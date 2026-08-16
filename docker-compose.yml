@@ -1,0 +1,129 @@
+# Sobe o gateway e, opcionalmente, o backend que ele protege.
+#
+# Uso:
+#   cp .env.example .env    # preencha antes de subir
+#   docker compose up -d
+#   docker compose logs -f gateway
+#
+# EXPOSICAO PUBLICA: este compose NAO inclui tunel. O gateway e publicado em
+# 127.0.0.1:${GATEWAY_PORT} do host, e a sua solucao de tunel (Tailscale
+# Funnel, Cloudflare Tunnel, reverse proxy) roda no HOST apontando para essa
+# porta -- exatamente como faria se o gateway fosse um processo comum. A
+# vantagem pratica: se voce ja tem um tunel funcionando com uma URL fixa,
+# migrar para Docker nao muda a URL nem exige reconfigurar o OAuth no Google.
+
+services:
+  # --------------------------------------------------------------------
+  # O gateway. Este servico e o projeto; e o unico que voce sempre precisa.
+  # --------------------------------------------------------------------
+  gateway:
+    build: .
+    image: mcp-oauth-gateway:latest
+    restart: unless-stopped
+
+    # Le o .env da raiz do projeto. Diferente de `environment:`, isso mantem
+    # os segredos fora do docker-compose.yml (que e versionado).
+    env_file:
+      - .env
+
+    environment:
+      # Sobrescrevem o .env DENTRO do container.
+      #
+      # GATEWAY_HOST=0.0.0.0: 127.0.0.1 (o default, correto no host) faria o
+      # processo so aceitar conexoes de dentro do proprio container, e o
+      # mapeamento de porta nunca o alcancaria.
+      #
+      # GATEWAY_PORT=8000 fixo: no .env, GATEWAY_PORT significa "em que porta
+      # do HOST eu quero acessar isso" e e usado no mapeamento abaixo. Dentro
+      # do container a porta e sempre 8000 (a mesma do EXPOSE). Sem este
+      # override, um GATEWAY_PORT=8007 no .env faria o processo escutar em
+      # 8007 dentro do container enquanto o mapeamento aponta para 8000 --
+      # container "Up" e saudavel, e nenhuma requisicao chegando.
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8000
+      LOG_DIR: /app/logs
+
+    ports:
+      # Publicado SO em 127.0.0.1 do host, nunca em 0.0.0.0: quem alcanca o
+      # gateway de fora e o tunel (que roda no host), nao a rede local. Sem
+      # o prefixo 127.0.0.1, o Docker publicaria em todas as interfaces e
+      # qualquer maquina da sua rede alcancaria o gateway diretamente.
+      - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
+
+    volumes:
+      # Persiste o log de auditoria fora do container -- senao ele some a
+      # cada `docker compose down`, e um log de acesso que nao sobrevive ao
+      # restart nao serve para auditar nada.
+      - ./logs:/app/logs
+
+    # depends_on so garante ORDEM DE INICIO, nao que o backend esteja pronto
+    # para atender. O gateway lida com isso: a primeira chamada MCP que
+    # chegar antes do backend subir falha e e registrada no access.log; as
+    # seguintes funcionam. Se o seu backend demora muito a subir, adicione um
+    # healthcheck nele e use `condition: service_healthy` aqui.
+    depends_on:
+      - backend
+
+  # --------------------------------------------------------------------
+  # O backend: o servidor MCP que o gateway protege.
+  #
+  # O exemplo abaixo usa um MCP real (enquire-mcp, que serve um vault do
+  # Obsidian) porque um exemplo concreto e testavel vale mais que um
+  # placeholder. TROQUE ESTE SERVICO INTEIRO pelo seu MCP.
+  #
+  # O contrato entre gateway e backend e minimo: o backend precisa falar
+  # Streamable HTTP num endereco que o gateway alcance pela rede do compose.
+  # Nada alem disso -- linguagem, imagem base e forma de rodar sao com voce.
+  #
+  # Se o seu MCP so fala stdio, voce tem duas opcoes:
+  #   (a) rode-o com algum wrapper que exponha HTTP (muitos MCPs tem um modo
+  #       "serve-http" ou equivalente) -- preferivel em Docker;
+  #   (b) use BACKEND_TRANSPORT=stdio e adicione o runtime dele ao Dockerfile
+  #       do gateway, removendo este servico. Ver nota no topo do Dockerfile.
+  # --------------------------------------------------------------------
+  backend:
+    image: node:22-slim
+    restart: unless-stopped
+
+    # NAO publica porta no host: o backend so precisa ser alcancavel pelo
+    # gateway, e ambos estao na mesma rede interna do compose. Menos uma
+    # superficie exposta.
+    expose:
+      - "3000"
+
+    environment:
+      # O gateway envia este token em toda chamada ao backend. Precisa bater
+      # com BACKEND_BEARER_TOKEN no .env (e o MESMO valor: o gateway le do
+      # .env para montar o header, o backend le daqui para validar).
+      #
+      # Deixe vazio para rodar SEM bearer. Dentro da rede do compose, com o
+      # backend sem porta publicada, isso e defensavel: o unico processo que
+      # o alcanca e o gateway. O comando abaixo se adapta sozinho aos dois
+      # casos -- ver o `if`.
+      BACKEND_BEARER_TOKEN: ${BACKEND_BEARER_TOKEN:-}
+
+    volumes:
+      # Somente leitura (:ro) -- o exemplo roda sem --enable-write. Se o seu
+      # backend precisa escrever, remova o :ro e entenda que quem passar pela
+      # allowlist tera acesso de escrita.
+      - "${OBSIDIAN_VAULT_PATH:-./vault}:/vault:ro"
+
+    # O `if` mantem o exemplo funcional nos DOIS modos, com e sem bearer,
+    # sem exigir que voce edite este arquivo para alternar -- basta preencher
+    # ou esvaziar BACKEND_BEARER_TOKEN no .env.
+    #
+    # Cuidado ao trocar pelo seu MCP: alguns servidores (o enquire-mcp deste
+    # exemplo entre eles) EXIGEM um bearer no modo HTTP e recusam subir sem
+    # um. Nesse caso o ramo "sem bearer" abaixo nao se aplica ao backend --
+    # mas o gateway continua suportando os dois modos normalmente, e o ramo
+    # existe para backends que aceitem conexao sem autenticacao propria.
+    command: >
+      sh -c 'if [ -n "$$BACKEND_BEARER_TOKEN" ]; then
+        echo "backend: iniciando COM bearer";
+        exec npx -y @oomkapwn/enquire-mcp serve-http --vault /vault
+          --host 0.0.0.0 --port 3000 --bearer-token-env BACKEND_BEARER_TOKEN;
+      else
+        echo "backend: iniciando SEM bearer";
+        exec npx -y @oomkapwn/enquire-mcp serve-http --vault /vault
+          --host 0.0.0.0 --port 3000;
+      fi'

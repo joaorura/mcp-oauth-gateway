@@ -226,6 +226,105 @@ Claude: claude.ai → Settings → Connectors → Add custom connector → cole 
 `<PUBLIC_BASE_URL>/mcp`, deixe os campos de OAuth Client vazios — o gateway
 suporta registro dinâmico de cliente).
 
+## Docker
+
+```bash
+cp .env.example .env    # preencha antes de subir
+docker compose up -d
+docker compose logs -f gateway
+```
+
+O `docker-compose.yml` sobe dois serviços: o **gateway** (este projeto) e um
+**backend** de exemplo. O backend do exemplo serve um vault do Obsidian via
+`enquire-mcp`, porque um exemplo concreto e testável ensina mais que um
+placeholder — **troque aquele serviço inteiro pelo seu MCP**. O contrato
+entre os dois é mínimo: o backend precisa falar Streamable HTTP num endereço
+alcançável pela rede interna do compose.
+
+Alguns detalhes do desenho que valem entender antes de adaptar:
+
+**`BACKEND_URL` usa o nome do serviço, não `127.0.0.1`.** Dentro de um
+container, `localhost` é o próprio container. Na rede do compose, os serviços
+se enxergam pelo nome: `BACKEND_URL=http://backend:3000/mcp`.
+
+**O backend não publica porta no host.** Ele usa `expose:` em vez de
+`ports:` — fica alcançável pelo gateway e por mais ninguém. Verifique com
+`docker compose ps`: a linha do backend deve mostrar só `3000/tcp`, sem
+nenhum `0.0.0.0:...->` ou `127.0.0.1:...->`.
+
+**O gateway publica só em `127.0.0.1` do host.** Quem o alcança de fora é o
+seu túnel (que roda no host), não a rede local. Sem o prefixo `127.0.0.1:` no
+mapeamento, o Docker publicaria em todas as interfaces e qualquer máquina da
+sua rede alcançaria o gateway diretamente.
+
+**`GATEWAY_PORT` no `.env` é a porta do HOST.** Dentro do container a porta é
+sempre 8000, fixada pelo `environment:` do compose. Se você remover esse
+override, um `GATEWAY_PORT=8007` faria o processo escutar em 8007 dentro do
+container enquanto o mapeamento aponta para 8000 — o container fica `Up` e
+saudável, e nenhuma requisição chega.
+
+**Logs em volume.** `./logs:/app/logs` mantém o `access.log` fora do
+container; sem isso ele sumiria a cada `docker compose down`, e um log de
+auditoria que não sobrevive a restart não serve para auditar nada.
+
+### Backend com e sem bearer
+
+Os dois modos funcionam, e alternar entre eles é só preencher ou esvaziar
+`BACKEND_BEARER_TOKEN` no `.env` — o `command` do serviço de backend no
+compose tem um `if` que se adapta, sem exigir edição do arquivo.
+
+```env
+# Com bearer: o gateway envia "authorization: Bearer <valor>" ao backend.
+# O MESMO valor precisa chegar ao backend para ele validar.
+BACKEND_BEARER_TOKEN=algum-token
+```
+
+```env
+# Sem bearer: nenhum header Authorization é enviado ao backend.
+BACKEND_BEARER_TOKEN=
+```
+
+Rodar sem bearer é defensável neste desenho: o backend não publica porta no
+host, então o único processo que o alcança é o gateway, na rede interna do
+compose — e o gateway já exige OAuth + allowlist de quem vem de fora. O
+bearer entre gateway e backend é defesa em profundidade, não o perímetro.
+
+**Atenção ao trocar pelo seu MCP:** alguns servidores exigem bearer no modo
+HTTP e recusam subir sem um. O `enquire-mcp` usado no exemplo é um deles —
+seu `serve-http` documenta *"Requires --bearer-token (or
+--bearer-token-env)"*. Isso é uma restrição **do backend**, não do gateway;
+com um backend que aceite conexão sem autenticação, o modo sem bearer
+funciona normalmente (verificado: gateway proxiando para um MCP sem auth,
+listando ferramentas e executando chamadas).
+
+### Exposição pública com Docker
+
+O compose **não** inclui túnel, de propósito. O gateway fica em
+`127.0.0.1:<GATEWAY_PORT>` do host, e a sua solução de túnel roda no host
+apontando para essa porta — exatamente como faria se o gateway fosse um
+processo comum. Consequência prática útil: **se você já tem um túnel
+funcionando com URL fixa, migrar para Docker não muda a URL nem exige
+reconfigurar o OAuth no Google.**
+
+Se você quiser o túnel também em container, saiba o trade-off: o
+`cloudflared` em *quick tunnel* gera uma URL nova a cada restart do
+container, o que quebra o redirect URI cadastrado no Google a cada reinício.
+Para URL fixa via container é preciso um *named tunnel*, que exige um domínio
+seu na Cloudflare. O Tailscale em container precisa de `NET_ADMIN` e
+`/dev/net/tun`, reduzindo bastante o isolamento que o Docker daria.
+
+### Backends stdio em Docker
+
+`BACKEND_TRANSPORT=stdio` funciona, mas repare no que ele implica aqui: o
+gateway *spawna* o processo do backend, então o runtime dele (Node, Go, outro
+Python) precisa existir **dentro da imagem do gateway**. Isso incha a imagem e
+a acopla a um backend específico.
+
+Em Docker, prefira `BACKEND_TRANSPORT=http` com o backend num serviço
+separado — cada um com sua imagem enxuta, se falando pela rede interna. A
+maioria dos MCPs que só documentam stdio tem também um modo `serve-http` ou
+equivalente.
+
 ## Autostart no Windows
 
 ```powershell

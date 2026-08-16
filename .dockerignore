@@ -1,0 +1,23 @@
+# Segredos — nunca devem entrar na imagem
+.env
+.env.*
+!.env.example
+*.secret
+
+# Ambiente e caches locais
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Logs
+logs/
+*.log
+
+# Git e docs — irrelevantes em runtime, so aumentam a imagem
+.git/
+.gitignore
+README.md
+LLM_PROMPT.md
+docs/
