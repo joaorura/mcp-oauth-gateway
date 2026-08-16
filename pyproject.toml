@@ -1,0 +1,16 @@
+[project]
+name = "mcp-oauth-gateway"
+version = "0.1.0"
+description = "Gateway OAuth (Google) generico na frente de qualquer servidor MCP"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.4",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
