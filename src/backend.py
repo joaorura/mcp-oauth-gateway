@@ -26,6 +26,7 @@ Dois transportes suportados, escolhidos por `BACKEND_TRANSPORT`:
 import os
 import shlex
 
+from fastmcp import Client
 from fastmcp.client.transports import ClientTransport, StdioTransport, StreamableHttpTransport
 
 from src.upstream import upstream_auth_headers
@@ -71,3 +72,37 @@ def _build_stdio_backend() -> StdioTransport:
     args = shlex.split(args_raw) if args_raw else []
 
     return StdioTransport(command=command, args=args)
+
+
+async def fetch_backend_instructions(transport: ClientTransport) -> str | None:
+    """Pergunta ao backend suas proprias `instructions` (campo nativo do MCP).
+
+    `create_proxy` NAO propaga isso sozinho: se o gateway definir suas
+    proprias `instructions`, elas SUBSTITUEM as do backend sem aviso; se o
+    gateway nao definir nenhuma, o cliente final simplesmente nao ve as do
+    backend. Esta funcao existe para o chamador poder CONCATENAR as duas em
+    vez de perder uma delas silenciosamente -- ver `combine_instructions`.
+
+    Retorna None em qualquer falha (backend fora do ar no boot, timeout,
+    etc.) -- espiar as instructions do backend e um extra, nunca deve
+    impedir o gateway de subir.
+    """
+    try:
+        async with Client(transport) as c:
+            return c.initialize_result.instructions
+    except Exception:
+        return None
+
+
+def combine_instructions(gateway_text: str | None, backend_text: str | None) -> str | None:
+    """Junta as instructions do gateway com as do backend, sem perder nenhuma.
+
+    Ordem deliberada: as do gateway vem primeiro porque tipicamente tratam
+    de QUEM pode usar o servidor (ex.: confirmar identidade), uma
+    preocupacao anterior a COMO usar as ferramentas, que e do que as
+    instructions do backend costumam tratar.
+    """
+    partes = [t for t in (gateway_text, backend_text) if t]
+    if not partes:
+        return None
+    return "\n\n---\n\n".join(partes)

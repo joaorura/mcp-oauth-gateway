@@ -11,6 +11,7 @@ nao de editar este arquivo. Veja o README para o passo a passo completo, e
 LLM_PROMPT.md se quiser que uma IA faca a adaptacao para voce.
 """
 
+import asyncio
 import os
 import time
 
@@ -22,7 +23,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from src.allowlist import extract_identity, is_allowed
 from src.audit import build_audit_logger, log_access
-from src.backend import build_backend_transport
+from src.backend import build_backend_transport, combine_instructions, fetch_backend_instructions
 
 load_dotenv()
 
@@ -88,16 +89,31 @@ def build_gateway():
 
     backend = build_backend_transport()
 
+    # `instructions` e campo nativo do protocolo MCP: texto livre que o
+    # servidor entrega no `initialize`, antes de qualquer ferramenta ser
+    # chamada. `create_proxy` NAO herda as instructions do backend
+    # automaticamente -- se passarmos as nossas, elas SUBSTITUEM (nunca
+    # concatenam) as que o backend eventualmente tenha. Buscamos as do
+    # backend explicitamente para juntar as duas em vez de perder uma.
+    #
+    # So para BACKEND_TRANSPORT=http: para stdio, isso exigiria spawnar um
+    # processo extra so para espiar as instructions antes do processo "de
+    # verdade" que o create_proxy vai spawnar em seguida -- desperdicio, e
+    # com risco de efeito colateral se o processo do backend nao for
+    # idempotente ao iniciar.
+    backend_instructions = None
+    if os.environ.get("BACKEND_TRANSPORT", "").strip().lower() == "http":
+        backend_instructions = asyncio.run(fetch_backend_instructions(backend))
+
+    instructions = combine_instructions(
+        os.environ.get("GATEWAY_INSTRUCTIONS") or None,
+        backend_instructions,
+    )
+
     mcp = create_proxy(
         backend,
         name=os.environ.get("GATEWAY_NAME", "MCP OAuth Gateway"),
-        # `instructions` e campo nativo do protocolo MCP: texto livre que o
-        # servidor entrega no `initialize`, antes de qualquer ferramenta ser
-        # chamada. E onde descrever "para que serve este backend" -- o
-        # cliente (Claude) usa isso para decidir quando e como usar as
-        # ferramentas, sem precisar adivinhar pelo nome do conector. Opcional
-        # de proposito: nem todo backend precisa disso.
-        instructions=os.environ.get("GATEWAY_INSTRUCTIONS") or None,
+        instructions=instructions,
         auth=auth,
         middleware=[AllowlistMiddleware(audit_logger)],
     )
