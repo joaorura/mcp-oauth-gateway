@@ -91,6 +91,13 @@ def build_gateway():
     mcp = create_proxy(
         backend,
         name=os.environ.get("GATEWAY_NAME", "MCP OAuth Gateway"),
+        # `instructions` e campo nativo do protocolo MCP: texto livre que o
+        # servidor entrega no `initialize`, antes de qualquer ferramenta ser
+        # chamada. E onde descrever "para que serve este backend" -- o
+        # cliente (Claude) usa isso para decidir quando e como usar as
+        # ferramentas, sem precisar adivinhar pelo nome do conector. Opcional
+        # de proposito: nem todo backend precisa disso.
+        instructions=os.environ.get("GATEWAY_INSTRUCTIONS") or None,
         auth=auth,
         middleware=[AllowlistMiddleware(audit_logger)],
     )
